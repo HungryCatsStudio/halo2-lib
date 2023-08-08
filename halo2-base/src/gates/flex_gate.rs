@@ -6,7 +6,7 @@ use crate::{
         },
         poly::Rotation,
     },
-    utils::ScalarField,
+    utils::{ScalarField, log2_ceil},
     AssignedValue, Context,
     QuantumCell::{self, Constant, Existing, Witness, WitnessFraction},
 };
@@ -759,6 +759,28 @@ pub trait GateInstructions<F: ScalarField> {
         let ind = self.idx_to_indicator(ctx, idx, len);
         self.select_by_indicator(ctx, cells, ind)
     }
+    /// Same as the previous, with the assumption that idx < len(cells), otherwise it panics.
+    fn select_from_idx_safe<Q>(
+        &self,
+        ctx: &mut Context<F>,
+        cells: impl IntoIterator<Item = Q>,
+        idx: impl Into<QuantumCell<F>>,
+    )
+    where
+        Q: Into<QuantumCell<F>>,
+    {
+        let cells = cells.into_iter();
+        let (len, hi) = cells.size_hint();
+        assert_eq!(Some(len), hi);
+
+        let bit_len_up = log2_ceil(len as u64);
+        let bit_len_down = bit_len_up - 1;
+        let bit_str = self.num_to_bits(ctx, AssignedValue { value: (Assigned::Trivial(*idx.into().value())), cell: (None)}, bit_len_up);
+        // let tensor_prod = tensor_values(self, ctx, bit_str);
+        // let ind = self.idx_to_indicator(ctx, idx, len);
+        // self.select_by_indicator(ctx, cells, ind);
+    }
+
 
     /// Constrains that a cell is equal to 0 and returns `1` if `a = 0`, otherwise `0`.
     ///
@@ -1256,4 +1278,29 @@ impl<F: ScalarField> GateInstructions<F> for GateChip<F> {
         // left rotate by BIT == right rotate by (NUM_BITS - BIT)
         self.const_right_rotate_unsafe_internal(ctx, a, NUM_BITS - BIT, NUM_BITS)
     }
+}
+
+fn tensor_values<F: ScalarField>(
+    gate: &impl GateInstructions<F>,
+    ctx: &mut Context<F>,
+    values: Vec<AssignedValue<F>>,
+) -> Vec<AssignedValue<F>> {
+    let one = ctx.load_constant(F::one());
+    let anti_values: Vec<AssignedValue<F>> =
+        values.iter().map(|v| gate.sub(ctx, one, *v)).collect();
+    // TODO benchmark whether it is more expensive to compute 1 - r in circuit (as above)
+    // or compute out-circuit and constrain a + b = 1
+
+    let mut layer: Vec<AssignedValue<F>> = vec![one];
+
+    for i in 0..values.len() {
+        let mut new_layer = Vec::new();
+        for v in &layer {
+            new_layer.push(gate.mul(ctx, *v, anti_values[i]));
+            new_layer.push(gate.mul(ctx, *v, values[i]));
+        }
+        layer = new_layer;
+    }
+
+    layer
 }
